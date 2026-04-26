@@ -11,7 +11,7 @@
  * Off by default. Enable per session with /auto-handoff on, or set defaults
  * for a project by creating .pi/auto-handoff.json:
  *
- *   { "enabled": true, "workThreshold": 120 }
+ *   { "enabled": true, "workThreshold": 50 }
  *
  * Install: pi install https://github.com/danecando/pi-auto-handoff
  *
@@ -32,7 +32,7 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import { BorderedLoader, convertToLlm, serializeConversation } from "@mariozechner/pi-coding-agent";
 
-const DEFAULT_WORK_THRESHOLD = 120;
+const DEFAULT_WORK_THRESHOLD = 50;
 
 // Mirrors core/compaction/utils.ts SUMMARIZATION_SYSTEM_PROMPT — kept inline
 // because the package does not export it. Update here if pi changes its prompt.
