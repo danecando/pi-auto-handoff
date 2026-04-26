@@ -2,6 +2,8 @@
 	"name": "pi-auto-handoff",
 	"version": "1.0.0",
 	"description": "Auto-handoff extension for pi coding agent — transfers context to a fresh session when a conversation gets long",
-	"extensions": ["index.ts"],
-	"license": "MIT"
+	"license": "MIT",
+	"pi": {
+		"extensions": ["index.ts"]
+	}
 }
