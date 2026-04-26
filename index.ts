@@ -1,15 +1,17 @@
 /**
  * Auto-handoff extension for pi coding agent.
  *
- * Counts completed user turns in the current session. Once the count crosses
- * the configured threshold, the user is notified once and the editor is
- * pre-filled with /handoff. Running /handoff generates a structured
- * continuation summary and opens a fresh session with it ready to submit.
+ * Counts completed assistant turns in the current session. A turn is one LLM
+ * response plus any tool calls that response makes, which is a better proxy
+ * for agent work than user prompt count. Once the count crosses the configured
+ * threshold, the user is notified once and the editor is pre-filled with
+ * /handoff. Running /handoff generates a structured continuation summary and
+ * opens a fresh session with it ready to submit.
  *
  * Off by default. Enable per session with /auto-handoff on, or set defaults
  * for a project by creating .pi/auto-handoff.json:
  *
- *   { "enabled": true, "turnsThreshold": 25 }
+ *   { "enabled": true, "workThreshold": 120 }
  *
  * Install: pi install https://github.com/danecando/pi-auto-handoff
  *
@@ -22,10 +24,15 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { complete, type Message } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, SessionEntry } from "@mariozechner/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+	SessionEntry,
+} from "@mariozechner/pi-coding-agent";
 import { BorderedLoader, convertToLlm, serializeConversation } from "@mariozechner/pi-coding-agent";
 
-const DEFAULT_TURNS_THRESHOLD = 25;
+const DEFAULT_WORK_THRESHOLD = 120;
 
 // Mirrors core/compaction/utils.ts SUMMARIZATION_SYSTEM_PROMPT — kept inline
 // because the package does not export it. Update here if pi changes its prompt.
@@ -69,39 +76,62 @@ Keep each section concise. Preserve exact file paths, function names, and error 
 
 interface ProjectConfig {
 	enabled: boolean;
-	turnsThreshold: number;
+	workThreshold: number;
 }
 
+interface ProjectConfigFile {
+	enabled?: boolean;
+	workThreshold?: number;
+}
+
+type HandoffContext = ExtensionContext | ExtensionCommandContext;
+
+const parsePositiveNumber = (value: unknown): number | null =>
+	typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+
 const readProjectConfig = (cwd: string): ProjectConfig => {
-	const defaults: ProjectConfig = { enabled: false, turnsThreshold: DEFAULT_TURNS_THRESHOLD };
+	const defaults: ProjectConfig = { enabled: false, workThreshold: DEFAULT_WORK_THRESHOLD };
 	try {
 		const raw = readFileSync(join(cwd, ".pi", "auto-handoff.json"), "utf8");
-		const parsed = JSON.parse(raw) as Partial<ProjectConfig>;
+		const parsed = JSON.parse(raw) as ProjectConfigFile;
+		const workThreshold = parsePositiveNumber(parsed.workThreshold) ?? defaults.workThreshold;
 		return {
 			enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : defaults.enabled,
-			turnsThreshold:
-				typeof parsed.turnsThreshold === "number" && parsed.turnsThreshold > 0
-					? parsed.turnsThreshold
-					: defaults.turnsThreshold,
+			workThreshold,
 		};
 	} catch {
 		return defaults;
 	}
 };
 
-const countUserTurns = (entries: SessionEntry[]): number =>
-	entries.filter((e) => e.type === "message" && e.message.role === "user").length;
+const countAgentTurns = (entries: SessionEntry[]): number =>
+	entries.filter((e) => e.type === "message" && e.message.role === "assistant").length;
 
 export default function (pi: ExtensionAPI) {
 	let enabled = false;
-	let turnsThreshold = DEFAULT_TURNS_THRESHOLD;
+	let workThreshold = DEFAULT_WORK_THRESHOLD;
 	let notified = false;
 
 	const loadConfig = (cwd: string) => {
 		const cfg = readProjectConfig(cwd);
 		enabled = cfg.enabled;
-		turnsThreshold = cfg.turnsThreshold;
+		workThreshold = cfg.workThreshold;
 		notified = false;
+	};
+
+	const maybePromptHandoff = (ctx: HandoffContext) => {
+		const agentTurns = countAgentTurns(ctx.sessionManager.getBranch());
+		if (!enabled || notified || !ctx.hasUI || agentTurns < workThreshold) {
+			return { agentTurns, prompted: false };
+		}
+
+		notified = true;
+		ctx.ui.notify(
+			`Session has ${agentTurns} agent turns (threshold ${workThreshold}). Run /handoff to continue in a fresh session.`,
+			"warning",
+		);
+		ctx.ui.setEditorText("/handoff");
+		return { agentTurns, prompted: true };
 	};
 
 	pi.on("session_start", (_event, ctx) => {
@@ -109,26 +139,23 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("turn_end", (_event, ctx) => {
-		if (!enabled || notified || !ctx.hasUI) return;
-		const turns = countUserTurns(ctx.sessionManager.getBranch());
-		if (turns < turnsThreshold) return;
-
-		notified = true;
-		ctx.ui.notify(
-			`Session has ${turns} user turns (threshold ${turnsThreshold}). Run /handoff to continue in a fresh session.`,
-			"warning",
-		);
-		ctx.ui.setEditorText("/handoff");
+		maybePromptHandoff(ctx);
 	});
 
 	pi.registerCommand("auto-handoff", {
-		description: "Toggle automatic handoff prompt for long sessions (on|off, no args = status)",
+		description: "Toggle automatic handoff prompt for long-running agent sessions (on|off, no args = status)",
 		handler: async (args, ctx) => {
 			const arg = args.trim().toLowerCase();
 			if (arg === "on") {
 				enabled = true;
 				notified = false;
-				ctx.ui.notify(`auto-handoff: ON (threshold ${turnsThreshold} turns)`, "info");
+				const { agentTurns, prompted } = maybePromptHandoff(ctx);
+				if (!prompted) {
+					ctx.ui.notify(
+						`auto-handoff: ON — ${agentTurns}/${workThreshold} agent turns`,
+						"info",
+					);
+				}
 				return;
 			}
 			if (arg === "off") {
@@ -140,9 +167,9 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("Usage: /auto-handoff [on|off]", "error");
 				return;
 			}
-			const turns = countUserTurns(ctx.sessionManager.getBranch());
+			const agentTurns = countAgentTurns(ctx.sessionManager.getBranch());
 			ctx.ui.notify(
-				`auto-handoff: ${enabled ? "ON" : "OFF"} — ${turns}/${turnsThreshold} user turns${notified ? " (already notified)" : ""}`,
+				`auto-handoff: ${enabled ? "ON" : "OFF"} — ${agentTurns}/${workThreshold} agent turns${notified ? " (already notified)" : ""}`,
 				"info",
 			);
 		},
