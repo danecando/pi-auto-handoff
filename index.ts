@@ -11,7 +11,7 @@
  *
  *   { "enabled": true, "turnsThreshold": 25 }
  *
- * Install: pi install github.com/danecando/pi-auto-handoff
+ * Install: pi install https://github.com/danecando/pi-auto-handoff
  *
  * Commands:
  *   /auto-handoff              show current status
